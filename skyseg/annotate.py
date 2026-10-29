@@ -9,6 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
+from tqdm import tqdm
 
 from .common import (
     discover_images, file_hash, pixel_hash, read_rgb, require_separate_output,
@@ -71,11 +72,11 @@ class Sam3Backend:
         use_bf16 = self.device.type == "cuda" and torch.cuda.is_bf16_supported()
         self.bf16 = use_bf16 and args.precision == "bf16"
         if args.precision == "bf16" and not use_bf16:
-            print("BF16 unavailable on this device; using FP32.", flush=True)
+            tqdm.write("BF16 unavailable on this device; using FP32.")
         self.model = build_sam3_image_model(**kwargs).to(device=self.device, dtype=torch.float32).eval()
         if not self.bf16:
             count = configure_sam3_fp32(self.model)
-            print(f"SAM3 FP32: using unfused computation for {count} ViT MLP blocks.", flush=True)
+            tqdm.write(f"SAM3 FP32: using unfused computation for {count} ViT MLP blocks.")
         self.processor = Sam3Processor(self.model, device=str(self.device), confidence_threshold=args.confidence)
 
     def predict(self, image, prompt):
@@ -124,54 +125,60 @@ def run(args, backend=None) -> int:
     write_json(output / "run.json", config)
     records = []
     invalidated_reviews = set()
-    for index, path in enumerate(images, 1):
-        relative = path.relative_to(root).as_posix()
-        sid = sample_id(relative)
-        record_path = output / "records" / f"{sid}.json"
-        source_sha = file_hash(path)
-        if args.resume and record_path.exists():
-            previous = json.loads(record_path.read_text(encoding="utf-8"))
-            complete = all((output / previous[key]).is_file() for key in ("image", "mask", "overlay") if key in previous)
-            if previous.get("source_sha256") == source_sha and previous["status"] != "error" and complete:
-                records.append(previous)
-                print(f"[{index}/{len(images)}] resume {relative}", flush=True)
-                continue
-            if previous.get("source_sha256") != source_sha:
-                invalidated_reviews.add(sid)
-        record = {"id": sid, "source": relative, "source_sha256": source_sha,
-                  "group": path.relative_to(root).parent.as_posix(), "status": "error"}
-        try:
-            image = read_rgb(path)
-            # Initialize lazily: a fully cached resume needs no GPU/model download.
-            if backend is None:
-                backend = Sam3Backend(args)
-            masks, scores = backend.predict(image, args.prompt)
-            mask, kept_scores = merge_predictions(masks, scores, (image.height, image.width), args.confidence)
-            fraction = float(mask.mean())
-            warnings = []
-            if not mask.any():
-                warnings.append("empty_prediction_not_confirmed_negative")
-            elif not args.min_sky_fraction <= fraction <= args.max_sky_fraction:
-                warnings.append("sky_fraction_outlier")
-            record.update(
-                status="ok" if mask.any() else "empty", width=image.width, height=image.height,
-                image=f"images/{sid}.png", mask=f"masks/{sid}.png", overlay=f"overlays/{sid}.jpg",
-                pixel_sha256=pixel_hash(image), scores=kept_scores, sky_fraction=fraction,
-                warnings=warnings,
-            )
-            (output / "images").mkdir(exist_ok=True)
-            image.save(output / record["image"])
-            save_mask(output / record["mask"], mask)
-            save_overlay(output / record["overlay"], image, mask)
-        except Exception as exc:
-            record.update(status="error", error=f"{type(exc).__name__}: {exc}", traceback=traceback.format_exc())
-            # A failed dependency/checkpoint initialization affects every image.
-            if backend is None:
-                write_json(record_path, record)
-                raise
-        write_json(record_path, record)
-        records.append(record)
-        print(f"[{index}/{len(images)}] {record['status']}: {relative}", flush=True)
+    progress_counts = Counter(ok=0, empty=0, error=0, skipped=0)
+    with tqdm(images, desc="SAM3 annotate", unit="image", dynamic_ncols=True) as progress:
+        for path in progress:
+            relative = path.relative_to(root).as_posix()
+            sid = sample_id(relative)
+            record_path = output / "records" / f"{sid}.json"
+            source_sha = file_hash(path)
+            if args.resume and record_path.exists():
+                previous = json.loads(record_path.read_text(encoding="utf-8"))
+                complete = all((output / previous[key]).is_file() for key in ("image", "mask", "overlay") if key in previous)
+                if previous.get("source_sha256") == source_sha and previous["status"] != "error" and complete:
+                    records.append(previous)
+                    progress_counts["skipped"] += 1
+                    progress.set_postfix(progress_counts, refresh=False)
+                    continue
+                if previous.get("source_sha256") != source_sha:
+                    invalidated_reviews.add(sid)
+            record = {"id": sid, "source": relative, "source_sha256": source_sha,
+                      "group": path.relative_to(root).parent.as_posix(), "status": "error"}
+            try:
+                image = read_rgb(path)
+                # Initialize lazily: a fully cached resume needs no GPU/model download.
+                if backend is None:
+                    backend = Sam3Backend(args)
+                masks, scores = backend.predict(image, args.prompt)
+                mask, kept_scores = merge_predictions(masks, scores, (image.height, image.width), args.confidence)
+                fraction = float(mask.mean())
+                warnings = []
+                if not mask.any():
+                    warnings.append("empty_prediction_not_confirmed_negative")
+                elif not args.min_sky_fraction <= fraction <= args.max_sky_fraction:
+                    warnings.append("sky_fraction_outlier")
+                record.update(
+                    status="ok" if mask.any() else "empty", width=image.width, height=image.height,
+                    image=f"images/{sid}.png", mask=f"masks/{sid}.png", overlay=f"overlays/{sid}.jpg",
+                    pixel_sha256=pixel_hash(image), scores=kept_scores, sky_fraction=fraction,
+                    warnings=warnings,
+                )
+                (output / "images").mkdir(exist_ok=True)
+                image.save(output / record["image"])
+                save_mask(output / record["mask"], mask)
+                save_overlay(output / record["overlay"], image, mask)
+            except Exception as exc:
+                record.update(status="error", error=f"{type(exc).__name__}: {exc}", traceback=traceback.format_exc())
+                # A failed dependency/checkpoint initialization affects every image.
+                if backend is None:
+                    write_json(record_path, record)
+                    raise
+            write_json(record_path, record)
+            records.append(record)
+            progress_counts[record["status"]] += 1
+            progress.set_postfix(progress_counts, refresh=False)
+            if record["status"] == "error":
+                tqdm.write(f"ERROR {relative}: {record['error']}")
     write_jsonl(output / "manifest.jsonl", records)
     # Never overwrite human decisions on resume. This file is an editable template.
     review = output / "review.csv"

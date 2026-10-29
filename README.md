@@ -102,6 +102,8 @@ python -m skyseg annotate \
 
 程序加载一次模型、逐图推理，不把整套数据集放进显存。默认 FP32；该模式使用原模型权重及普通 ViT MLP 计算，绕过上游强制转换为 BF16 的融合算子，避免 `mat1 and mat2 must have the same dtype, but got BFloat16 and Float`。只调整当前模型实例，不改动已安装的 SAM3 源文件。在支持 BF16 的 GPU 上可以从首次运行起加 `--precision bf16` 节省资源；该模式用同一个 autocast 上下文包住图像编码和文本分割，仍需先用样本比较效果。设备不支持 BF16 时回退到上述 FP32 路径。切换 prompt、阈值、精度、设备或权重位置时使用新的输出目录，防止混合不同设置。`cuda:1` 等设备编号会显式传给模型和 processor。
 
+标注过程默认显示 **tqdm 进度条**，包含已处理数量、百分比、耗时、预计剩余时间、速度，以及 `ok` / `empty` / `error` / `skipped` 数量。`--resume` 跳过的已完成图片也会计入进度；错误信息单独输出，结束后保留最终统计，不再为每张图片打印一行进度。
+
 如果旧版本已遇到这个 dtype 错误，先运行 `git pull --ff-only` 更新本仓库，然后**保留原命令的参数，添加 `--resume`** 重试。默认 `--precision fp32` 已修复，无须切换 BF16 或删除已有输出。成功项会跳过，`error` 项会重新处理。若你原来显式指定了 `--precision bf16`，续跑也保留该参数；改成 FP32 时需换新输出目录。失败记录现在还会保存完整 `traceback`，便于定位其他错误。
 
 输出内容：

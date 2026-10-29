@@ -12,6 +12,7 @@ dependencies = [
     "Pillow>=10,<13",
     "opencv-python>=4.10,<4.12",
     "PyYAML>=6,<7",
+    "tqdm>=4.66,<5",
 ]
 
 [project.optional-dependencies]
