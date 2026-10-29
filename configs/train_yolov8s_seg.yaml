@@ -1,0 +1,32 @@
+# Keep the requested YOLOv8s-seg architecture; do not substitute newer YOLO models.
+model: yolov8s-seg.pt
+epochs: 100
+imgsz: 640
+batch: 8
+device: '0'
+workers: 4
+patience: 30
+seed: 42
+deterministic: true
+optimizer: auto
+amp: true
+cache: false
+mask_ratio: 1
+# Each disconnected sky island is a separate instance, semantically unioned later.
+overlap_mask: false
+# Conservative augmentation for upright, night-sky/ground images.
+mosaic: 0.0
+mixup: 0.0
+copy_paste: 0.0
+degrees: 0.0
+translate: 0.05
+scale: 0.2
+shear: 0.0
+perspective: 0.0
+flipud: 0.0
+fliplr: 0.5
+hsv_h: 0.0
+hsv_s: 0.1
+hsv_v: 0.2
+project: runs/segment
+name: sky_yolov8s
