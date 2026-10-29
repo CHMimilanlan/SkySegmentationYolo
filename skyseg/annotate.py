@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import csv
 import json
+import traceback
 from collections import Counter
-from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +14,7 @@ from .common import (
     discover_images, file_hash, pixel_hash, read_rgb, require_separate_output,
     sample_id, save_mask, save_overlay, write_json, write_jsonl,
 )
+from .sam3_precision import configure_sam3_fp32
 
 
 def _numpy(value):
@@ -67,16 +68,21 @@ class Sam3Backend:
             kwargs.update(checkpoint_path=str(args.checkpoint.resolve()), load_from_HF=False)
         if args.bpe_path:
             kwargs["bpe_path"] = str(args.bpe_path.resolve())
-        self.model = build_sam3_image_model(**kwargs).to(self.device).eval()
-        self.processor = Sam3Processor(self.model, device=str(self.device), confidence_threshold=args.confidence)
         use_bf16 = self.device.type == "cuda" and torch.cuda.is_bf16_supported()
         self.bf16 = use_bf16 and args.precision == "bf16"
         if args.precision == "bf16" and not use_bf16:
             print("BF16 unavailable on this device; using FP32.", flush=True)
+        self.model = build_sam3_image_model(**kwargs).to(device=self.device, dtype=torch.float32).eval()
+        if not self.bf16:
+            count = configure_sam3_fp32(self.model)
+            print(f"SAM3 FP32: using unfused computation for {count} ViT MLP blocks.", flush=True)
+        self.processor = Sam3Processor(self.model, device=str(self.device), confidence_threshold=args.confidence)
 
     def predict(self, image, prompt):
         torch = self.torch
-        context = torch.autocast("cuda", dtype=torch.bfloat16) if self.bf16 else nullcontext()
+        # Explicitly disable ambient autocast in FP32 mode. Both image encoding
+        # and text grounding must share the same precision context in BF16 mode.
+        context = torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.bf16)
         with torch.inference_mode(), context:
             state = self.processor.set_image(image)
             output = self.processor.set_text_prompt(state=state, prompt=prompt)
@@ -158,7 +164,7 @@ def run(args, backend=None) -> int:
             save_mask(output / record["mask"], mask)
             save_overlay(output / record["overlay"], image, mask)
         except Exception as exc:
-            record.update(status="error", error=f"{type(exc).__name__}: {exc}")
+            record.update(status="error", error=f"{type(exc).__name__}: {exc}", traceback=traceback.format_exc())
             # A failed dependency/checkpoint initialization affects every image.
             if backend is None:
                 write_json(record_path, record)

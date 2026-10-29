@@ -241,6 +241,7 @@ def test_annotation_errors_are_not_negatives(tmp_path):
     rows = read_jsonl(output / "manifest.jsonl")
     assert {row["status"] for row in rows} == {"error", "ok"}
     assert not any("mask" in row for row in rows if row["status"] == "error")
+    assert "Traceback" in next(row["traceback"] for row in rows if row["status"] == "error")
 
 
 class ArrayTensor:

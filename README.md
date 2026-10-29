@@ -100,7 +100,9 @@ python -m skyseg annotate \
   --resume
 ```
 
-程序加载一次模型、逐图推理，不把整套数据集放进显存。默认 FP32；在支持 BF16 的 GPU 上可以从首次运行起加 `--precision bf16` 节省资源，但必须先用样本比较效果。切换 prompt、阈值、精度、设备或权重位置时使用新的输出目录，防止混合不同设置。`cuda:1` 等设备编号会显式传给模型和 processor。
+程序加载一次模型、逐图推理，不把整套数据集放进显存。默认 FP32；该模式使用原模型权重及普通 ViT MLP 计算，绕过上游强制转换为 BF16 的融合算子，避免 `mat1 and mat2 must have the same dtype, but got BFloat16 and Float`。只调整当前模型实例，不改动已安装的 SAM3 源文件。在支持 BF16 的 GPU 上可以从首次运行起加 `--precision bf16` 节省资源；该模式用同一个 autocast 上下文包住图像编码和文本分割，仍需先用样本比较效果。设备不支持 BF16 时回退到上述 FP32 路径。切换 prompt、阈值、精度、设备或权重位置时使用新的输出目录，防止混合不同设置。`cuda:1` 等设备编号会显式传给模型和 processor。
+
+如果旧版本已遇到这个 dtype 错误，先运行 `git pull --ff-only` 更新本仓库，然后**保留原命令的参数，添加 `--resume`** 重试。默认 `--precision fp32` 已修复，无须切换 BF16 或删除已有输出。成功项会跳过，`error` 项会重新处理。若你原来显式指定了 `--precision bf16`，续跑也保留该参数；改成 FP32 时需换新输出目录。失败记录现在还会保存完整 `traceback`，便于定位其他错误。
 
 输出内容：
 
@@ -277,6 +279,7 @@ non_sky = ~sky
 | 文件 | 功能 |
 | --- | --- |
 | `skyseg/annotate.py` | SAM3 图片文本分割、mask 合并、断点记录 |
+| `skyseg/sam3_precision.py` | FP32 模式绕过 SAM3 强制 BF16 的融合 MLP |
 | `skyseg/dataset.py` | 人工审核、修正 mask、去重、按组划分 |
 | `skyseg/polygons.py` | mask → YOLO polygon、回转精度检查 |
 | `skyseg/validate.py` | 数据完整性与泄漏检查 |
@@ -284,8 +287,9 @@ non_sky = ~sky
 | `skyseg/inference.py` | 二值预测与像素指标 |
 | `configs/train_yolov8s_seg.yaml` | YOLOv8s-seg 初始训练配置 |
 | `tests/test_pipeline.py` | 不依赖模型的 CPU 回归测试 |
+| `tests/test_sam3_precision.py` | 使用真实 PyTorch CPU 张量复现及验证 dtype 修复 |
 
-提交前在 Python 3.12、NumPy 1.26、OpenCV 4.11 环境中验证安装、`pip check`、17 项 CPU 测试以及 CLI 参数 / dry-run。测试包括 SAM3 输出形状、空结果、多区域合并、EXIF、mask 到 polygon、孔洞损失、人工修正、负样本、重复冲突、组划分、resume 和模拟 YOLO 推理 / 评估。**测试使用模拟模型输出；尚未在你的 GPU、真实图片或权重上执行 SAM3 推理与 YOLO 训练。**
+在 Python 3.12、NumPy 1.26、OpenCV 4.11、PyTorch 2.10 CPU 环境中，`pip check` 和 26 项测试全部通过：17 项数据流程测试，以及 9 项真实 PyTorch 张量精度回归测试。后者用同样的强制 BF16 融合算子加 FP32 线性层复现原错误，验证 FP32 修复后结果与普通 MLP 一致、参数保持不变、不会修改其他模型实例、外层 autocast 被正确隔离、BF16 回退以及图像 / 文本阶段共享上下文。未安装 torch 时只运行基础测试，精度测试会跳过。**测试使用小型模型或模拟 SAM3 / YOLO 接口；尚未在你的 GPU、真实图片或完整权重上执行 SAM3 推理与 YOLO 训练。**
 
 参考官方接口（2026-10-29 核对）：
 
