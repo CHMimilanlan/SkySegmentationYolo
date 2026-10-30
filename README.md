@@ -168,6 +168,7 @@ python -m skyseg build \
 | `data.yaml` | 可直接传入 Ultralytics 的数据配置 |
 | `dataset_manifest.jsonl` | 每图 split、来源、标签及审核信息 |
 | `conversion_report.jsonl` | 转换质量、纳入 / 排除原因 |
+| `selection_summary.json` | 划分前的可用图片、组数、审核结论和排除原因统计；失败时也保存 |
 | `build_config.json` / `summary.json` | 构建配置、种子和统计 |
 
 **mask 转 polygon 的限制**：YOLOv8-seg 是实例分割，普通一行 polygon 无法表达内部孔洞。程序对不连通的天空分别生成标签，不仅保留最大区域；默认忽略轮廓面积不足 64 像素的碎片，简化误差 1 像素。然后把保存的多边形重新栅格化，与原始 mask 计算 IoU；低于 **0.98** 的图片默认排除，记录 `polygon_roundtrip_loss`，避免静默把树冠中的地物孔洞填成天空。
@@ -175,6 +176,8 @@ python -m skyseg build \
 原始二值 mask 始终保留。若很多图片被排除，先检查 `holes` / `polygon_iou` / `dropped_components`，可用 `--epsilon 0 --min-area 0` 减少简化损失；这仍不能表达孔洞。降低 `--min-polygon-iou` 是有意识接受标签近似，不代表解决了孔洞问题。若必须精确描述复杂树枝 / 孔洞边界，应评估直接使用语义分割模型。
 
 重复像素图片在划分前去重；完全相同图像对应冲突 mask 时直接报错。按父目录分组不能自动识别跨目录的近重复场景，原始目录组织仍需检查。输出目录必须为空；重新构建使用 `datasets/sky_v2` 等新目录。若样本过少导致构建失败，诊断会保存在输出目录中，修正后同样换一个新目录。
+
+若构建提示没有可用图片，先查看 `selection_summary.json` 的 `eligible_images` 和 `exclusion_reasons`。最常见的 `not_reviewed` 表示使用了 `--approved-only`，但审核表中的 `decision` 仍为空；自动生成审核表不会自动批准样本。检查 mask 后填写 `accept` / `negative`，或者在明确使用未审核伪标签时去掉 `--approved-only`。不要批量把未检查的图片标成已审核。`found 0` 是筛选后没有可用图片，修改划分比例不能解决；有图片但只有一个原始父目录，则是分组不足，独立散图可用 `--group-by image`，视频帧应继续按场景分组。
 
 ```bash
 python -m skyseg validate --data datasets/sky_v1/data.yaml
@@ -291,7 +294,7 @@ non_sky = ~sky
 | `tests/test_pipeline.py` | 不依赖模型的 CPU 回归测试 |
 | `tests/test_sam3_precision.py` | 使用真实 PyTorch CPU 张量复现及验证 dtype 修复 |
 
-在 Python 3.12、NumPy 1.26、OpenCV 4.11、PyTorch 2.10 CPU 环境中，`pip check` 和 26 项测试全部通过：17 项数据流程测试，以及 9 项真实 PyTorch 张量精度回归测试。后者用同样的强制 BF16 融合算子加 FP32 线性层复现原错误，验证 FP32 修复后结果与普通 MLP 一致、参数保持不变、不会修改其他模型实例、外层 autocast 被正确隔离、BF16 回退以及图像 / 文本阶段共享上下文。未安装 torch 时只运行基础测试，精度测试会跳过。**测试使用小型模型或模拟 SAM3 / YOLO 接口；尚未在你的 GPU、真实图片或完整权重上执行 SAM3 推理与 YOLO 训练。**
+测试集包含 19 项数据流程测试，以及 9 项真实 PyTorch 张量精度回归测试。本次构建诊断更新在 Python 3.12、NumPy 1.26、OpenCV 4.11 环境中通过全部 19 项数据流程测试和 `pip check`；未安装 torch，精度测试模块跳过。9 项精度测试此前已在 PyTorch 2.10 CPU 环境中通过：用同样的强制 BF16 融合算子加 FP32 线性层复现原错误，验证 FP32 修复后结果与普通 MLP 一致、参数保持不变、不会修改其他模型实例、外层 autocast 被正确隔离、BF16 回退以及图像 / 文本阶段共享上下文。**测试使用小型模型或模拟 SAM3 / YOLO 接口；尚未在你的 GPU、真实图片或完整权重上执行 SAM3 推理与 YOLO 训练。**
 
 参考官方接口（2026-10-29 核对）：
 

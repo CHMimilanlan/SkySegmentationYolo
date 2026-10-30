@@ -140,7 +140,50 @@ def run(args) -> int:
     # Write diagnostics even when filtering leaves too little data to split.
     output.mkdir(parents=True, exist_ok=True)
     write_jsonl(output / "conversion_report.jsonl", reports)
-    assignment = split_groups(candidates, args.val_ratio, args.test_ratio, args.seed)
+    exclusions = dict(Counter(report["reason"] for report in reports if "reason" in report))
+    groups = {item["split_group"] for item in candidates}
+    selection = {
+        "input_images": len(records), "eligible_images": len(candidates),
+        "eligible_groups": len(groups), "group_by": args.group_by,
+        "approved_only": args.approved_only,
+        "review_decisions": dict(Counter(reviews.get(record["id"], {}).get("decision") or "blank"
+                                         for record in records)),
+        "exclusion_reasons": exclusions,
+    }
+    write_json(output / "selection_summary.json", selection)
+    print(f"Selection: {len(candidates)}/{len(records)} eligible images, {len(groups)} groups; "
+          f"exclusions={exclusions}", flush=True)
+    if not candidates:
+        hints = []
+        if not records:
+            hints.append("The annotation manifest is empty; run annotate on the intended image directory first.")
+        if exclusions.get("not_reviewed"):
+            hints.append("--approved-only requires decision=accept or negative in the review CSV. "
+                         "The automatically generated review.csv starts with blank decisions. "
+                         "Review the masks and fill these decisions; omit --approved-only only if you "
+                         "intend to use unreviewed automatic labels.")
+        if exclusions.get("needs_review"):
+            hints.append("Empty predictions or flagged masks need explicit review decisions.")
+        if exclusions.get("polygon_roundtrip_loss"):
+            hints.append("Some masks lose too much detail when converted to polygons; inspect polygon_iou and holes in the report.")
+        if exclusions.get("annotation_error_rerun_or_repair_first"):
+            hints.append("Annotation errors must be repaired or retried before building the dataset.")
+        raise ValueError(
+            f"No eligible images remain after filtering (0/{len(records)}). "
+            f"Exclusion reasons: {exclusions}. " + " ".join(hints)
+            + f" See {output / 'selection_summary.json'} and conversion_report.jsonl. "
+            "Changing split ratios or grouping cannot fix an empty selection; use a new output directory when retrying."
+        )
+    try:
+        assignment = split_groups(candidates, args.val_ratio, args.test_ratio, args.seed)
+    except ValueError as exc:
+        hint = ""
+        if args.group_by == "parent" and len(groups) < (3 if args.test_ratio > 0 else 2):
+            hint = (" --group-by parent uses each original image's parent stored in manifest.jsonl, "
+                    "not the generated images/ directory. Use --group-by image only for independent photos; "
+                    "keep related video frames or scenes in the same group.")
+        raise ValueError(f"{exc}{hint} See {output / 'selection_summary.json'}; "
+                         "use a new output directory when retrying.") from exc
     for split in {"train", "val"}:
         if not any(item["polygons"] and assignment[item["split_group"]] == split for item in candidates):
             raise ValueError(f"{split} has no positive sky labels; adjust independent groups/seed/reviews")

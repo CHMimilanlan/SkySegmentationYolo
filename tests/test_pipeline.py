@@ -59,6 +59,48 @@ def write_reviews(path, rows):
         writer.writerows(rows)
 
 
+def test_approved_only_empty_selection_reports_review_filter(tmp_path):
+    _, annotations, _ = create_annotations(tmp_path)
+    output = tmp_path / "unreviewed"
+    with pytest.raises(ValueError, match="No eligible images") as error:
+        dataset.run(args("build", "--annotations", annotations, "--reviews", annotations / "review.csv",
+                         "--approved-only", "--output", output, "--group-by", "parent"))
+    assert "--approved-only requires decision=accept or negative" in str(error.value)
+    selection = json.loads((output / "selection_summary.json").read_text())
+    assert selection["input_images"] == 8 and selection["eligible_images"] == 0
+    assert selection["review_decisions"] == {"blank": 8}
+    assert selection["exclusion_reasons"] == {"not_reviewed": 8}
+    assert not (output / "data.yaml").exists()
+    # Explicitly opting into automatic labels succeeds; no reviews are fabricated.
+    automatic = tmp_path / "automatic"
+    assert dataset.run(args("build", "--annotations", annotations, "--reviews", annotations / "review.csv",
+                            "--output", automatic, "--group-by", "parent")) == 0
+    with (annotations / "review.csv").open(newline="") as f:
+        assert all(row["decision"] == "" for row in csv.DictReader(f))
+
+
+def test_single_original_parent_is_distinct_from_empty_selection(tmp_path):
+    raw, annotations = tmp_path / "raw", tmp_path / "annotations"
+    raw.mkdir()
+    for index in range(4):
+        Image.new("RGB", (96, 64), (index * 20 + 1, 20, 30)).save(raw / f"{index}.png")
+    annotate.run(args("annotate", "--images", raw, "--output", annotations), backend=FakeSam3())
+    rows = read_jsonl(annotations / "manifest.jsonl")
+    review = annotations / "review.csv"
+    write_reviews(review, [{"id": row["id"], "decision": "accept"} for row in rows])
+    output = tmp_path / "one_group"
+    with pytest.raises(ValueError, match="found 1") as error:
+        dataset.run(args("build", "--annotations", annotations, "--reviews", review,
+                         "--approved-only", "--output", output, "--group-by", "parent"))
+    assert "original image's parent" in str(error.value)
+    selection = json.loads((output / "selection_summary.json").read_text())
+    assert selection["eligible_images"] == 4 and selection["eligible_groups"] == 1
+    assert selection["exclusion_reasons"] == {}
+    # Only explicitly choosing an image-level split treats these independent photos separately.
+    assert dataset.run(args("build", "--annotations", annotations, "--reviews", review,
+                            "--approved-only", "--output", tmp_path / "independent", "--group-by", "image")) == 0
+
+
 def test_sam3_masks_union_shapes_empty_and_scores():
     masks = np.zeros((2, 1, 30, 40), dtype=bool)
     masks[0, 0, :10] = True
