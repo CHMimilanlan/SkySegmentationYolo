@@ -185,7 +185,11 @@ python -m skyseg validate --data datasets/sky_v1/data.yaml
 
 会检查标签格式 / 坐标 / 面积、图像-mask 尺寸、内容哈希、负样本空标签、重复图像、场景组泄漏和转换一致性。生成的 YAML 使用绝对数据路径；移动数据集到其他机器后修改 YAML 中的 `path`，再重新 validate。dataset manifest 内部均为相对路径。
 
+校验会立即输出配置路径、目录扫描和各 split 的图片数量，然后显示 tqdm 进度、当前文件及检查阶段。每张图片、mask 和标签只读取一次，同时完成全部完整性检查；不缓存整套解码图像。图片 / mask 解码失败时，报错会带上对应文件路径。大图、PNG 解压或慢速磁盘仍可能耗时，进度条会停留在当前文件，不能仅凭解码函数处的堆栈判断文件损坏。
+
 ## 6. 训练 YOLOv8s-seg
+
+`train` 首先执行上述数据校验，再加载 YOLO 和启动训练。启动时会立即打印 `[train]` / `[validate]` 阶段信息；校验完成前不会出现 YOLO 的 epoch / loss 日志。需要同时保存终端输出时，可使用 `python -u -m skyseg train ... 2>&1 | tee train.log`。
 
 先检查参数和数据；不加载模型、不占 GPU：
 
@@ -292,9 +296,10 @@ non_sky = ~sky
 | `skyseg/inference.py` | 二值预测与像素指标 |
 | `configs/train_yolov8s_seg.yaml` | YOLOv8s-seg 初始训练配置 |
 | `tests/test_pipeline.py` | 不依赖模型的 CPU 回归测试 |
+| `tests/test_validation.py` | 校验进度、单次读取、损坏文件路径及完整性检查回归测试 |
 | `tests/test_sam3_precision.py` | 使用真实 PyTorch CPU 张量复现及验证 dtype 修复 |
 
-测试集包含 19 项数据流程测试，以及 9 项真实 PyTorch 张量精度回归测试。本次构建诊断更新在 Python 3.12、NumPy 1.26、OpenCV 4.11 环境中通过全部 19 项数据流程测试和 `pip check`；未安装 torch，精度测试模块跳过。9 项精度测试此前已在 PyTorch 2.10 CPU 环境中通过：用同样的强制 BF16 融合算子加 FP32 线性层复现原错误，验证 FP32 修复后结果与普通 MLP 一致、参数保持不变、不会修改其他模型实例、外层 autocast 被正确隔离、BF16 回退以及图像 / 文本阶段共享上下文。**测试使用小型模型或模拟 SAM3 / YOLO 接口；尚未在你的 GPU、真实图片或完整权重上执行 SAM3 推理与 YOLO 训练。**
+测试集包含 25 项数据流程 / 校验测试，以及 9 项真实 PyTorch 张量精度回归测试。本次校验日志更新在 Python 3.12、NumPy 1.26、OpenCV 4.11 环境中通过全部 25 项数据流程 / 校验测试和 `pip check`；未安装 torch，精度测试模块跳过。9 项精度测试此前已在 PyTorch 2.10 CPU 环境中通过：用同样的强制 BF16 融合算子加 FP32 线性层复现原错误，验证 FP32 修复后结果与普通 MLP 一致、参数保持不变、不会修改其他模型实例、外层 autocast 被正确隔离、BF16 回退以及图像 / 文本阶段共享上下文。**测试使用小型模型或模拟 SAM3 / YOLO 接口；尚未在你的 GPU、真实图片或完整权重上执行 SAM3 推理与 YOLO 训练。**
 
 参考官方接口（2026-10-29 核对）：
 

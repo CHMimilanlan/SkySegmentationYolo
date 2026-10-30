@@ -28,11 +28,12 @@ def training_settings(args) -> tuple[str, dict]:
 
 
 def run(args) -> int:
+    print("[train] Validating the dataset before loading YOLO. Large images or slow storage can take time.", flush=True)
     validate_dataset(args.data)
     model_path, config = training_settings(args)
-    print(yaml.safe_dump({"model": model_path, **config}, sort_keys=False))
+    print(yaml.safe_dump({"model": model_path, **config}, sort_keys=False), flush=True)
     if args.dry_run:
-        print("Dry run finished; no model loaded or training started.")
+        print("Dry run finished; no model loaded or training started.", flush=True)
         return 0
     try:
         from ultralytics import YOLO
@@ -43,19 +44,23 @@ def run(args) -> int:
             raise ValueError("--resume requires --model /path/to/weights/last.pt")
         # Ultralytics restores training arguments from the checkpoint itself.
         overrides = {key: config[key] for key in ("device", "workers") if config.get(key) is not None}
+        print(f"[train] Loading resume checkpoint: {args.model}", flush=True)
         model = YOLO(args.model, task="segment")
         checkpoint_data = model.ckpt.get("train_args", {}).get("data")
         if checkpoint_data and Path(str(checkpoint_data)).resolve() != args.data.resolve():
             raise ValueError("Resume checkpoint uses a different dataset path; use the original --data, "
                              "or start a new fine-tuning run without --resume")
+        print("[train] Resuming Ultralytics training.", flush=True)
         model.train(resume=True, **overrides)
     else:
+        print(f"[train] Loading segmentation model: {model_path}", flush=True)
         model = YOLO(model_path, task="segment")
+        print("[train] Starting Ultralytics training.", flush=True)
         model.train(**config)
     save_dir = Path(model.trainer.save_dir)
     write_json(save_dir / "pipeline_environment.json", {
         name: importlib.metadata.version(name)
         for name in ("ultralytics", "torch", "torchvision", "numpy", "Pillow", "opencv-python")
     })
-    print(f"Training completed. Best weights: {save_dir / 'weights' / 'best.pt'}")
+    print(f"Training completed. Best weights: {save_dir / 'weights' / 'best.pt'}", flush=True)
     return 0

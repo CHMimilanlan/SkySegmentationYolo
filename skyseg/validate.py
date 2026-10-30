@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import numpy as np
 import yaml
+from tqdm import tqdm
 
 from .common import discover_images, mask_iou, pixel_hash, read_jsonl, read_mask, read_rgb
 from .polygons import polygons_to_mask
@@ -47,8 +49,14 @@ def dataset_paths(data: Path):
 
 
 def validate_dataset(data: Path) -> dict:
+    print(f"[validate] Loading dataset configuration: {data.resolve()}", flush=True)
     config, root = dataset_paths(data)
-    hashes, result, actual_ids = {}, {}, set()
+    manifest_file = root / "dataset_manifest.jsonl"
+    print(f"[validate] Reading manifest: {manifest_file}", flush=True)
+    if not manifest_file.is_file():
+        raise ValueError("Missing dataset_manifest.jsonl")
+    manifest = read_jsonl(manifest_file)
+    split_images, actual_ids = {}, set()
     for split in ("train", "val", "test"):
         if split not in config:
             if split != "test":
@@ -57,35 +65,19 @@ def validate_dataset(data: Path) -> dict:
         expected = f"images/{split}"
         if config[split] != expected:
             raise ValueError(f"Expected {split}: {expected}; use a dataset built by skyseg build")
+        print(f"[validate] Scanning {split}: {root / expected}", flush=True)
         images = discover_images(root / expected)
         if not images:
             raise ValueError(f"Empty {split} split")
-        positive = 0
+        split_images[split] = images
         for path in images:
-            image = read_rgb(path)
-            digest = pixel_hash(image)
-            if digest in hashes:
-                raise ValueError(f"Duplicate pixels in dataset: {path} and {hashes[digest]}")
-            hashes[digest] = str(path)
-            relative = path.relative_to(root / "images" / split)
-            label = root / "labels" / split / relative.with_suffix(".txt")
-            polygons = read_labels(label)
-            positive += bool(polygons)
-            actual_ids.add((split, path.stem))
-            mask_path = root / "masks" / split / relative.with_suffix(".png")
-            if not mask_path.is_file():
-                raise ValueError(f"Missing semantic reference mask: {mask_path}")
-            mask = read_mask(mask_path, image.size)
-            if bool(mask.any()) != bool(polygons):
-                raise ValueError(f"Mask/label foreground mismatch: {path}")
-        if split in {"train", "val"} and not positive:
-            raise ValueError(f"No positive labels in {split}")
-        result[split] = {"images": len(images), "positive": positive, "negative": len(images) - positive}
-    manifest_file = root / "dataset_manifest.jsonl"
-    if not manifest_file.is_file():
-        raise ValueError("Missing dataset_manifest.jsonl")
-    manifest = read_jsonl(manifest_file)
-    if len(manifest) != len(actual_ids) or {(r["split"], r["id"]) for r in manifest} != actual_ids:
+            key = (split, path.stem)
+            if key in actual_ids:
+                raise ValueError(f"Duplicate sample id in {split}: {path.stem}")
+            actual_ids.add(key)
+        print(f"[validate] Found {len(images)} images in {split}.", flush=True)
+    manifest_ids = [(record["split"], record["id"]) for record in manifest]
+    if len(manifest_ids) != len(actual_ids) or set(manifest_ids) != actual_ids:
         raise ValueError("Dataset manifest does not match actual images")
     groups = {}
     for record in manifest:
@@ -93,18 +85,57 @@ def validate_dataset(data: Path) -> dict:
         if group in groups and groups[group] != record["split"]:
             raise ValueError(f"Scene group leaks between splits: {group}")
         groups[group] = record["split"]
-        image = read_rgb(root / record["image"])
-        if pixel_hash(image) != record["pixel_sha256"]:
-            raise ValueError(f"Image pixels differ from manifest: {record['id']}")
-        mask = read_mask(root / record["mask"], image.size)
-        import hashlib
-        if hashlib.sha256(mask.tobytes()).hexdigest() != record["mask_sha256"]:
-            raise ValueError(f"Reference mask changed; rebuild the dataset: {record['id']}")
-        polygons = read_labels(root / record["label"])
-        iou = mask_iou(mask, polygons_to_mask(polygons, mask.shape))
-        if abs(iou - record["polygon_iou"]) > 1e-6 or len(polygons) != record["instances"]:
-            raise ValueError(f"Labels differ from conversion manifest; rebuild: {record['id']}")
-    print(f"Dataset validation passed: {result}")
+    records_by_id = {(record["split"], record["id"]): record for record in manifest}
+    hashes, result = {}, {}
+    print(f"[validate] Checking {len(manifest)} image/mask/label pairs; each image is decoded once.", flush=True)
+    for split, images in split_images.items():
+        positive = 0
+        with tqdm(images, desc=f"Validate {split}", unit="image", dynamic_ncols=True) as progress:
+            for path in progress:
+                record = records_by_id[(split, path.stem)]
+                relative = path.relative_to(root / "images" / split)
+                label = root / "labels" / split / relative.with_suffix(".txt")
+                mask_path = root / "masks" / split / relative.with_suffix(".png")
+                # Refresh before decoding, so a slow image is visible even if its
+                # decoder or the underlying storage takes a long time to return.
+                progress.set_postfix(file=path.name, stage="image", refresh=True)
+                current_path = path
+                try:
+                    for field, expected_path in (("image", path), ("label", label), ("mask", mask_path)):
+                        if Path(record[field]) != expected_path.relative_to(root):
+                            raise ValueError(f"Manifest {field} path does not match sample: {record['id']}")
+                    image = read_rgb(path)
+                    digest = pixel_hash(image)
+                    if digest in hashes:
+                        raise ValueError(f"Duplicate pixels in dataset: {path} and {hashes[digest]}")
+                    hashes[digest] = str(path)
+                    if digest != record["pixel_sha256"]:
+                        raise ValueError(f"Image pixels differ from manifest: {record['id']}")
+                    current_path = label
+                    progress.set_postfix(file=path.name, stage="labels", refresh=False)
+                    polygons = read_labels(label)
+                    positive += bool(polygons)
+                    current_path = mask_path
+                    progress.set_postfix(file=path.name, stage="mask", refresh=False)
+                    if not mask_path.is_file():
+                        raise ValueError(f"Missing semantic reference mask: {mask_path}")
+                    mask = read_mask(mask_path, image.size)
+                    if bool(mask.any()) != bool(polygons):
+                        raise ValueError(f"Mask/label foreground mismatch: {path}")
+                    if hashlib.sha256(mask.tobytes()).hexdigest() != record["mask_sha256"]:
+                        raise ValueError(f"Reference mask changed; rebuild the dataset: {record['id']}")
+                    current_path = label
+                    progress.set_postfix(file=path.name, stage="polygon IoU", refresh=False)
+                    iou = mask_iou(mask, polygons_to_mask(polygons, mask.shape))
+                    if abs(iou - record["polygon_iou"]) > 1e-6 or len(polygons) != record["instances"]:
+                        raise ValueError(f"Labels differ from conversion manifest; rebuild: {record['id']}")
+                except (OSError, ValueError) as exc:
+                    raise ValueError(f"Dataset validation failed while checking {current_path}: {exc}") from exc
+        if split in {"train", "val"} and not positive:
+            raise ValueError(f"No positive labels in {split}")
+        result[split] = {"images": len(images), "positive": positive, "negative": len(images) - positive}
+        print(f"[validate] {split} passed: {result[split]}", flush=True)
+    print(f"Dataset validation passed: {result}", flush=True)
     return result
 
 
