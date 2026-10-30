@@ -16,6 +16,7 @@ import yaml
 from .common import (file_hash, pixel_hash, read_jsonl, read_mask, read_rgb,
                      require_separate_output, save_mask, save_overlay, write_json, write_jsonl)
 from .polygons import labels_text, mask_to_polygons, polygons_to_mask
+from .png_profiles import strip_png_icc
 
 
 def load_reviews(path: Path | None, valid_ids: set[str]) -> dict:
@@ -199,6 +200,9 @@ def run(args) -> int:
                 else np.zeros((image.height, image.width), dtype=bool))
         image_rel, label_rel, mask_rel = f"images/{split}/{sid}.png", f"labels/{split}/{sid}.txt", f"masks/{split}/{sid}.png"
         shutil.copy2(item["image_path"], output / image_rel)
+        # Old annotation outputs may still contain ICC profiles. Strip the
+        # destination only, preserving the compressed pixels and source files.
+        strip_png_icc(output / image_rel, in_place=True)
         (output / label_rel).write_text(labels_text(item["polygons"]), encoding="utf-8")
         save_mask(output / mask_rel, mask)
         save_overlay(output / "label_overlays" / split / f"{sid}.jpg", image,

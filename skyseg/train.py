@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from .common import write_json
+from .png_profiles import prepare_training_pngs
 from .validate import validate_dataset
 
 
@@ -32,8 +33,10 @@ def run(args) -> int:
     validate_dataset(args.data)
     model_path, config = training_settings(args)
     print(yaml.safe_dump({"model": model_path, **config}, sort_keys=False), flush=True)
+    print("[train] Preparing PNG ICC metadata in the actual dataset splits before YOLO loads images.", flush=True)
+    prepare_training_pngs(args.data, in_place=not args.dry_run)
     if args.dry_run:
-        print("Dry run finished; no model loaded or training started.", flush=True)
+        print("Dry run finished; PNG metadata was inspected only. No model loaded or training started.", flush=True)
         return 0
     try:
         from ultralytics import YOLO

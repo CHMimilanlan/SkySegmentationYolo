@@ -7,6 +7,7 @@ import os
 import shutil
 import struct
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 
 from tqdm import tqdm
@@ -91,24 +92,85 @@ def strip_png_icc(path: Path, *, in_place: bool = False) -> bool:
     return True
 
 
-def run(args) -> int:
-    images = [path for path in discover_images(args.images) if path.suffix.lower() == ".png"]
-    if not images:
-        raise ValueError(f"No PNG files found: {args.images}")
+def dataset_images(data: Path) -> list[Path]:
+    """Resolve the exact split directories used by this pipeline's data.yaml."""
+    from .validate import dataset_paths
+
+    config, root = dataset_paths(data)
+    print(f"[png] Dataset configuration: {data.resolve()}", flush=True)
+    print(f"[png] Resolved dataset root: {root}", flush=True)
+    directories = []
+    for split in ("train", "val", "test"):
+        if split not in config:
+            if split != "test":
+                raise ValueError(f"Missing {split} split in YAML")
+            continue
+        if config[split] != f"images/{split}":
+            raise ValueError(f"Expected {split}: images/{split}; use a dataset built by skyseg build")
+        directories.append((split, root / config[split]))
+    images = []
+    for split, directory in directories:
+        print(f"[png] {split}: {directory}", flush=True)
+        images.extend(discover_images(directory))
+    return images
+
+
+def clean_png_images(images: Iterable[Path], *, in_place: bool = False) -> dict:
+    # OpenCV selects its decoder using file contents. A PNG named .jpg can
+    # therefore emit the same iCCP warning; do not rely only on the extension.
+    pngs = []
+    for path in images:
+        if path.suffix.lower() == ".png":
+            pngs.append(path)
+        else:
+            try:
+                with path.open("rb") as stream:
+                    if stream.read(8) == PNG_SIGNATURE:
+                        pngs.append(path)
+            except OSError as exc:
+                raise ValueError(f"Cannot inspect image format: {path}: {exc}") from exc
+    images = pngs
     summary = {"png_files": len(images), "with_icc": 0, "cleaned": 0, "unchanged": 0, "errors": 0}
-    with tqdm(images, desc="Clean PNG ICC" if args.in_place else "Inspect PNG ICC",
+    with tqdm(images, desc="Clean PNG ICC" if in_place else "Inspect PNG ICC",
               unit="image", dynamic_ncols=True) as progress:
         for path in progress:
             try:
-                has_icc = strip_png_icc(path, in_place=args.in_place)
+                has_icc = strip_png_icc(path, in_place=in_place)
                 summary["with_icc" if has_icc else "unchanged"] += 1
-                if has_icc and args.in_place:
+                if has_icc and in_place:
                     summary["cleaned"] += 1
             except (OSError, ValueError) as exc:
                 summary["errors"] += 1
                 tqdm.write(f"ERROR {path}: {exc}")
             progress.set_postfix(cleaned=summary["cleaned"], errors=summary["errors"], refresh=False)
     print(json.dumps(summary, ensure_ascii=False), flush=True)
+    return summary
+
+
+def prepare_training_pngs(data: Path, *, in_place: bool = True) -> dict:
+    """Clean old dataset copies before any Ultralytics/OpenCV worker reads them."""
+    from .validate import dataset_paths
+
+    config, root = dataset_paths(data)
+    # Ultralytics versions can resolve relative `path` against cwd or their
+    # configured datasets directory. Our builder writes an absolute path;
+    # require that contract here instead of cleaning one tree and training on
+    # another. Omitting path is safe: the absolute YAML filename supplies it.
+    if config.get("path") and not Path(config["path"]).is_absolute():
+        raise ValueError(f"Use an absolute 'path' in {data.resolve()} so skyseg and Ultralytics read the same images. "
+                         f"For the validated dataset, set path: {root}")
+    summary = clean_png_images(dataset_images(data), in_place=in_place)
+    if summary["errors"]:
+        raise ValueError("PNG ICC preparation failed; training was not started. See the file paths above. "
+                         "The dataset copies must be writable for atomic metadata cleanup.")
+    return summary
+
+
+def run(args) -> int:
+    images = dataset_images(args.data) if args.data is not None else discover_images(args.images)
+    summary = clean_png_images(images, in_place=args.in_place)
+    if not summary["png_files"]:
+        raise ValueError(f"No PNG files found: {args.data or args.images}")
     if not args.in_place:
         print("Inspection only. Add --in-place to remove iCCP metadata while preserving compressed pixel data.", flush=True)
     return 1 if summary["errors"] else 0

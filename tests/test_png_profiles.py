@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import struct
 
+import cv2
 import numpy as np
 import pytest
 from PIL import Image, PngImagePlugin
@@ -107,3 +108,20 @@ def test_copy_failure_keeps_original_and_removes_temporary(tmp_path, monkeypatch
         png_profiles.strip_png_icc(path, in_place=True)
     assert path.read_bytes() == before
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_native_opencv_warning_removed_even_with_jpeg_extension(tmp_path, capfd):
+    # Exercise the C-level stderr path actually used by YOLO, not just Pillow
+    # metadata or Python's warnings filter. OpenCV detects PNG by signature.
+    path = tmp_path / "actually_png.jpg"
+    image = Image.new("RGB", (32, 24), (30, 50, 70))
+    image.save(path, format="PNG", icc_profile=b"fixture ICC profile")
+    before = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert "iCCP" in capfd.readouterr().err
+    summary = png_profiles.clean_png_images([path], in_place=True)
+    assert summary["cleaned"] == 1 and summary["errors"] == 0
+    capfd.readouterr()
+    for _ in range(3):
+        after = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        np.testing.assert_array_equal(after, before)
+    assert "libpng warning" not in capfd.readouterr().err

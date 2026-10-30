@@ -74,24 +74,30 @@ hf download facebook/sam3 sam3.pt --local-dir checkpoints/sam3
 
 ### 处理 `libpng warning: iCCP: known incorrect sRGB profile`
 
-这是 PNG 内嵌 ICC 颜色配置的警告，通常不阻止读取或训练。带该配置的图片每次被加载都可能重复打印。新版本在 RGB 读取和标注图片导出时去掉未使用的 ICC 配置，避免把原图的问题带进新的训练 PNG；该流程不执行 ICC 颜色空间变换。
+这是 PNG 内嵌 ICC 颜色配置的警告，通常不阻止读取或训练。Ultralytics 的图片加载器通过 OpenCV 解码磁盘文件，因此只在 Pillow 的 `image.info` 中删除 ICC，不能修复已经保存的训练图片。带该配置的文件在不同 epoch / worker 中被读取时会重复打印。
 
-旧数据不会随代码更新自动改变。对实际训练数据的 `images/` 目录，先检查，再在停止当前训练后清理：
+当前版本在三个位置处理：标注时导出的 PNG 不携带 ICC；`build` 复制旧标注图片后会清理**目标副本**；`train` 校验数据后、导入 YOLO / 启动 worker 前，会根据本次 `--data` 的实际路径自动清理 train / val / test 图片。旧训练集无须重跑 SAM3 或重新 build。启动时打印 `[png]` 配置路径、数据集根目录、各 split 路径及 `with_icc` / `cleaned` / `errors` 计数。`--dry-run` 只检查，不修改文件。
+
+`build` 生成的 YAML 已使用绝对 `path`。如果手动将其改为相对路径，`train` 会给出明确的绝对路径修改提示，防止不同 Ultralytics 版本从其他目录读取图片。
+
+也可以在停止当前训练后手动处理。推荐直接传入**和训练相同的 `data.yaml`**，避免清理了另一个同名目录：
 
 ```bash
 # 只检查，不修改文件
-python -m skyseg clean-png --images datasets/sky_v2/images
+python -m skyseg clean-png --data datasets/sky_v2/data.yaml
 
 # 清理已有 PNG 的 iCCP 元数据
-python -m skyseg clean-png --images datasets/sky_v2/images --in-place
+python -m skyseg clean-png --data datasets/sky_v2/data.yaml --in-place
 
-# 如果之后还会基于已有标注重新 build，也清理该标注目录中的图片副本
+# 也支持指定图片目录或单个文件
 python -m skyseg clean-png --images outputs/full_dataset/images --in-place
 ```
 
-将目录替换为你实际使用的路径。命令移除所有 iCCP 块，包括有效 ICC；其他 PNG 块、压缩像素数据、尺寸和透明度逐字节保留，不做解码或重新编码。分块复制使用固定大小缓冲区，只在成功后原子替换文件；默认只检查，显式加 `--in-place` 才修改。无 iCCP 的文件保持原样，符号链接不做原地替换，结构损坏的 PNG 会报告具体路径。
+将路径替换为实际训练使用的配置。清理识别 PNG 文件签名，也能处理扩展名误写成 `.jpg` 的 PNG。操作移除所有 iCCP 块，包括有效 ICC；其他 PNG 块、压缩像素数据、尺寸和透明度逐字节保留，不做解码、重新编码或 ICC 颜色空间变换。分块复制使用固定大小缓冲区，只在成功后原子替换文件；`clean-png` 默认只检查，显式加 `--in-place` 才修改。无 iCCP 的文件保持原样，符号链接不做原地替换，结构损坏或无法写入的文件会报告具体路径。自动清理失败时，`train` 会停止，不会带着未处理的文件启动训练。
 
 训练数据使用的是原始 RGB 像素值，清理后已有 mask、YOLO 标签和数据集像素哈希仍有效，无须重新运行 SAM3 或重新构建数据集。该命令用于训练数据副本的元数据清理，不用于摄影图片的 ICC 色彩校正。
+
+代码更新后需重启训练进程；正在运行的进程不会自动使用新代码。如果日志没有 `[png]` 阶段，检查 `python -c "import skyseg; print(skyseg.__file__)"` 是否指向当前仓库，并在仓库目录重新执行 `pip install -e '.[yolo]'`。直接运行 Ultralytics 的 `yolo segment train ...` 会绕过本项目的自动清理，此时先手动执行上面的 `clean-png --data ... --in-place`。
 
 ## 3. 用 SAM3 生成 sky mask
 
@@ -210,7 +216,7 @@ python -m skyseg validate --data datasets/sky_v1/data.yaml
 
 ## 6. 训练 YOLOv8s-seg
 
-`train` 首先执行上述数据校验，再加载 YOLO 和启动训练。启动时会立即打印 `[train]` / `[validate]` 阶段信息；校验完成前不会出现 YOLO 的 epoch / loss 日志。需要同时保存终端输出时，可使用 `python -u -m skyseg train ... 2>&1 | tee train.log`。
+`train` 首先执行上述数据校验，再清理实际 split 图片的 ICC 元数据，随后加载 YOLO 和启动训练。启动时打印 `[train]` / `[validate]` / `[png]` 阶段信息；这些步骤完成前不会出现 YOLO 的 epoch / loss 日志。需要同时保存终端输出时，可使用 `python -u -m skyseg train ... 2>&1 | tee train.log`。
 
 先检查参数和数据；不加载模型、不占 GPU：
 
@@ -322,7 +328,7 @@ non_sky = ~sky
 | `tests/test_png_profiles.py` | ICC 清理、非 ICC 块 / 像素保留及失败原子性回归测试 |
 | `tests/test_sam3_precision.py` | 使用真实 PyTorch CPU 张量复现及验证 dtype 修复 |
 
-测试集包含 34 项数据流程 / 校验 / PNG 清理测试，以及 9 项真实 PyTorch 张量精度回归测试。本次 ICC 清理更新在 Python 3.12、NumPy 1.26、OpenCV 4.11 环境中通过全部 34 项数据流程 / 校验 / PNG 清理测试和 `pip check`；未安装 torch，精度测试模块跳过。9 项精度测试此前已在 PyTorch 2.10 CPU 环境中通过：用同样的强制 BF16 融合算子加 FP32 线性层复现原错误，验证 FP32 修复后结果与普通 MLP 一致、参数保持不变、不会修改其他模型实例、外层 autocast 被正确隔离、BF16 回退以及图像 / 文本阶段共享上下文。**测试使用小型模型或模拟 SAM3 / YOLO 接口；尚未在你的 GPU、真实图片或完整权重上执行 SAM3 推理与 YOLO 训练。**
+测试集包含 42 项数据流程 / 校验 / PNG 清理测试，以及 9 项真实 PyTorch 张量精度回归测试。本次 ICC 清理更新在 Python 3.12、NumPy 1.26、OpenCV 4.11 环境中通过全部 42 项数据流程 / 校验 / PNG 清理测试和 `pip check`；未安装 torch，精度测试模块跳过。新增回归覆盖旧标注副本、训练 / 续训前自动清理、YAML 实际路径解析、只读清理失败、dry-run 不修改文件，以及真实 OpenCV C 层 ICC 警告在清理后消失且像素一致。9 项精度测试此前已在 PyTorch 2.10 CPU 环境中通过：用同样的强制 BF16 融合算子加 FP32 线性层复现原错误，验证 FP32 修复后结果与普通 MLP 一致、参数保持不变、不会修改其他模型实例、外层 autocast 被正确隔离、BF16 回退以及图像 / 文本阶段共享上下文。**测试使用小型模型或模拟 SAM3 / YOLO 接口；尚未在你的 GPU、真实图片或完整权重上执行 SAM3 推理与 YOLO 训练。**
 
 参考官方接口（2026-10-29 核对）：
 
