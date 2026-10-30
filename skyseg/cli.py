@@ -45,6 +45,11 @@ def parser() -> argparse.ArgumentParser:
     validate.add_argument("--data", type=Path, required=True)
     validate.set_defaults(handler="validate:run")
 
+    clean_png = commands.add_parser("clean-png", help="Inspect/remove unused PNG ICC profiles without changing pixel data")
+    clean_png.add_argument("--images", type=Path, required=True, help="PNG file or recursively scanned directory")
+    clean_png.add_argument("--in-place", action="store_true", help="Remove all iCCP chunks atomically; default only inspects")
+    clean_png.set_defaults(handler="png_profiles:run")
+
     train = commands.add_parser("train", help="Train the requested YOLOv8s-seg model")
     train.add_argument("--data", type=Path, required=True)
     train.add_argument("--config", type=Path, default=Path("configs/train_yolov8s_seg.yaml"))

@@ -164,7 +164,7 @@ def run(args, backend=None) -> int:
                     warnings=warnings,
                 )
                 (output / "images").mkdir(exist_ok=True)
-                image.save(output / record["image"])
+                image.save(output / record["image"], icc_profile=None)
                 save_mask(output / record["mask"], mask)
                 save_overlay(output / record["overlay"], image, mask)
             except Exception as exc:

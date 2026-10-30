@@ -72,6 +72,27 @@ hf download facebook/sam3 sam3.pt --local-dir checkpoints/sam3
 
 使用常规 **8-bit 可显示图像**。RAW / FITS / 科学 16-bit 图像应先使用统一、明确的拉伸策略导出为 8-bit RGB，不要让图片库随意截断。带 EXIF 旋转的图片会先转正，再以无损 PNG 保存为后续训练图片，保证 mask 与像素严格对齐。输出目录必须放在原始图片目录外。
 
+### 处理 `libpng warning: iCCP: known incorrect sRGB profile`
+
+这是 PNG 内嵌 ICC 颜色配置的警告，通常不阻止读取或训练。带该配置的图片每次被加载都可能重复打印。新版本在 RGB 读取和标注图片导出时去掉未使用的 ICC 配置，避免把原图的问题带进新的训练 PNG；该流程不执行 ICC 颜色空间变换。
+
+旧数据不会随代码更新自动改变。对实际训练数据的 `images/` 目录，先检查，再在停止当前训练后清理：
+
+```bash
+# 只检查，不修改文件
+python -m skyseg clean-png --images datasets/sky_v2/images
+
+# 清理已有 PNG 的 iCCP 元数据
+python -m skyseg clean-png --images datasets/sky_v2/images --in-place
+
+# 如果之后还会基于已有标注重新 build，也清理该标注目录中的图片副本
+python -m skyseg clean-png --images outputs/full_dataset/images --in-place
+```
+
+将目录替换为你实际使用的路径。命令移除所有 iCCP 块，包括有效 ICC；其他 PNG 块、压缩像素数据、尺寸和透明度逐字节保留，不做解码或重新编码。分块复制使用固定大小缓冲区，只在成功后原子替换文件；默认只检查，显式加 `--in-place` 才修改。无 iCCP 的文件保持原样，符号链接不做原地替换，结构损坏的 PNG 会报告具体路径。
+
+训练数据使用的是原始 RGB 像素值，清理后已有 mask、YOLO 标签和数据集像素哈希仍有效，无须重新运行 SAM3 或重新构建数据集。该命令用于训练数据副本的元数据清理，不用于摄影图片的 ICC 色彩校正。
+
 ## 3. 用 SAM3 生成 sky mask
 
 先试前 20 张，确认夜景分割符合你的需求：
@@ -292,14 +313,16 @@ non_sky = ~sky
 | `skyseg/dataset.py` | 人工审核、修正 mask、去重、按组划分 |
 | `skyseg/polygons.py` | mask → YOLO polygon、回转精度检查 |
 | `skyseg/validate.py` | 数据完整性与泄漏检查 |
+| `skyseg/png_profiles.py` | 检查 / 清理已有 PNG 的 ICC 元数据，保留压缩像素数据 |
 | `skyseg/train.py` | Ultralytics 训练 / 续训 / dry-run |
 | `skyseg/inference.py` | 二值预测与像素指标 |
 | `configs/train_yolov8s_seg.yaml` | YOLOv8s-seg 初始训练配置 |
 | `tests/test_pipeline.py` | 不依赖模型的 CPU 回归测试 |
 | `tests/test_validation.py` | 校验进度、单次读取、损坏文件路径及完整性检查回归测试 |
+| `tests/test_png_profiles.py` | ICC 清理、非 ICC 块 / 像素保留及失败原子性回归测试 |
 | `tests/test_sam3_precision.py` | 使用真实 PyTorch CPU 张量复现及验证 dtype 修复 |
 
-测试集包含 25 项数据流程 / 校验测试，以及 9 项真实 PyTorch 张量精度回归测试。本次校验日志更新在 Python 3.12、NumPy 1.26、OpenCV 4.11 环境中通过全部 25 项数据流程 / 校验测试和 `pip check`；未安装 torch，精度测试模块跳过。9 项精度测试此前已在 PyTorch 2.10 CPU 环境中通过：用同样的强制 BF16 融合算子加 FP32 线性层复现原错误，验证 FP32 修复后结果与普通 MLP 一致、参数保持不变、不会修改其他模型实例、外层 autocast 被正确隔离、BF16 回退以及图像 / 文本阶段共享上下文。**测试使用小型模型或模拟 SAM3 / YOLO 接口；尚未在你的 GPU、真实图片或完整权重上执行 SAM3 推理与 YOLO 训练。**
+测试集包含 34 项数据流程 / 校验 / PNG 清理测试，以及 9 项真实 PyTorch 张量精度回归测试。本次 ICC 清理更新在 Python 3.12、NumPy 1.26、OpenCV 4.11 环境中通过全部 34 项数据流程 / 校验 / PNG 清理测试和 `pip check`；未安装 torch，精度测试模块跳过。9 项精度测试此前已在 PyTorch 2.10 CPU 环境中通过：用同样的强制 BF16 融合算子加 FP32 线性层复现原错误，验证 FP32 修复后结果与普通 MLP 一致、参数保持不变、不会修改其他模型实例、外层 autocast 被正确隔离、BF16 回退以及图像 / 文本阶段共享上下文。**测试使用小型模型或模拟 SAM3 / YOLO 接口；尚未在你的 GPU、真实图片或完整权重上执行 SAM3 推理与 YOLO 训练。**
 
 参考官方接口（2026-10-29 核对）：
 

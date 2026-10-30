@@ -31,7 +31,12 @@ def read_rgb(path: Path) -> Image.Image:
             raise ValueError(f"Multi-frame images must first be exported to individual frames: {path}")
         if im.mode.startswith("I") or im.mode == "F":
             raise ValueError(f"Convert scientific/high-bit-depth data to an explicit 8-bit stretch first: {path}")
-        return ImageOps.exif_transpose(im).convert("RGB")
+        image = ImageOps.exif_transpose(im).convert("RGB")
+        # RGB conversion does not remove inherited ICC metadata. This pipeline
+        # consumes stored RGB values without an ICC color transform, so keep
+        # unused/broken profiles out of exported training PNGs.
+        image.info.pop("icc_profile", None)
+        return image
 
 
 def sample_id(relative_path: str) -> str:

@@ -73,6 +73,20 @@ def test_decode_error_identifies_file(built_dataset, capsys):
     assert path.name in output.err
 
 
+def test_profile_cleanup_keeps_dataset_manifest_valid(built_dataset):
+    from skyseg.png_profiles import strip_png_icc
+
+    records = read_jsonl(built_dataset / "dataset_manifest.jsonl")
+    for record in records:
+        path = built_dataset / record["image"]
+        with Image.open(path) as image:
+            copy = image.copy()
+        copy.save(path, icc_profile=b"fixture ICC profile")
+        assert strip_png_icc(path, in_place=True)
+    result = validation.validate_dataset(built_dataset / "data.yaml")
+    assert sum(split["images"] for split in result.values()) == len(records)
+
+
 @pytest.mark.parametrize("kind,expected", [
     ("image", "Image pixels differ from manifest"),
     ("mask", "Reference mask changed"),
