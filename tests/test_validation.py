@@ -163,6 +163,10 @@ def test_training_cleans_existing_dataset_before_yolo_reads_it(built_dataset, tm
             trained.append(kwargs)
 
     monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=FakeYOLO))
+    # Keep this regression focused on cleanup before YOLO reads the images;
+    # the real trainer/validator adapter has its own monitoring tests.
+    monkeypatch.setattr(train, "run_training", lambda model, monitoring, resume, config:
+                        model.train(**({"resume": True} if resume else {}), **config))
     monkeypatch.setattr(train.importlib.metadata, "version", lambda _: "test")
     arguments = ["train", "--data", str(built_dataset / "data.yaml")]
     if resume:

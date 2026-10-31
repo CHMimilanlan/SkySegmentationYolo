@@ -218,6 +218,8 @@ python -m skyseg validate --data datasets/sky_v1/data.yaml
 
 `train` 首先执行上述数据校验，再清理实际 split 图片的 ICC 元数据，随后加载 YOLO 和启动训练。启动时打印 `[train]` / `[validate]` / `[png]` 阶段信息；这些步骤完成前不会出现 YOLO 的 epoch / loss 日志。需要同时保存终端输出时，可使用 `python -u -m skyseg train ... 2>&1 | tee train.log`。
 
+更新后在当前环境执行 `pip install -e '.[yolo]'`，安装新增的 TensorBoard 依赖。
+
 先检查参数和数据；不加载模型、不占 GPU：
 
 ```bash
@@ -261,6 +263,49 @@ python -m skyseg train \
 ```
 
 `--resume` 恢复 checkpoint 内的训练设置和 epoch，不采用新 YAML 的 epochs / batch / imgsz 等参数；用相同数据集。想换数据 / 训练设置，用 `--model best.pt` 开启一次新的微调，不加 `--resume`。保留数据目录、构建配置、SAM3 源码版本以及 `python -m pip freeze` 的输出；固定 seed 不保证跨 GPU / CUDA 版本逐位一致。
+
+### Loss 曲线、逐 epoch 验证与分割结果
+
+每个 epoch 完成训练后，使用 **val 集完整验证一次**，记录验证 loss 和 box / mask 指标；`test` 集留给最终独立评估。训练入口固定开启 `val` 和 `plots`，续训时也会覆盖旧 checkpoint 中的 `val: false`。Ultralytics 默认的示例图只覆盖部分批次，不能替代本项目按 epoch 保存的完整结果。
+
+TensorBoard 默认开启，每个 epoch 刷新 train / val 的各项 loss、loss 分量之和、学习率和分割指标，并记录前 4 张验证叠加图。还会保留 Ultralytics 的 `results.csv`，训练结束后生成汇总曲线 `results.png`。
+
+```bash
+# 在服务器上运行；logdir 换成训练日志显示的实际目录
+tensorboard --logdir runs/segment/sky_yolov8s/tensorboard --port 6006
+
+# 若通过 SSH 连接，在自己电脑的终端转发端口
+ssh -N -L 6006:127.0.0.1:6006 xch@服务器IP
+```
+
+在本机浏览器打开 `http://127.0.0.1:6006`。也可将 logdir 指向 `runs/segment` 比较不同实验；Ultralytics 自带集成可能另写一份日志，本项目明确使用每个 run 下的 `tensorboard/` 子目录。
+
+| 输出路径（相对实际训练目录） | 内容 |
+| --- | --- |
+| `tensorboard/events.out.tfevents.*` | 每个 epoch 的曲线和少量验证预览 |
+| `validation/epoch_0001/masks/<id>.png` | 第 1 个 epoch 的天空二值 mask，像素值 0/255 |
+| `validation/epoch_0001/overlays/<id>.jpg` | 预测 mask 的叠加预览，最长边 1280 |
+| `validation/epoch_0001/predictions.jsonl` | 每张图的路径、尺寸、实例数和天空比例 |
+| `validation/epoch_0001/metrics.json` | 当前 epoch 的 train / val loss、学习率、验证指标及保存数量 |
+| `skyseg_monitor.json` | 本次曲线 / 结果保存参数 |
+| `results.csv` / `results.png` | Ultralytics 原始指标记录 / 汇总曲线 |
+
+后续 epoch 写入 `epoch_0002/`、`epoch_0003/` 等目录，续训继续原编号。最后对 `best.pt` 的额外评估不会被误记为新 epoch。中断在验证过程中时，未完成的索引保留为 `.jsonl.tmp`，完成后才成为正式 `.jsonl`。
+
+保存结果复用**本次验证的预测**，不再加载另一个模型或重复前向。各实例天空 mask 合并后，移除 letterbox padding，并映射回每张原图的尺寸；空预测也保存全零 mask。预览默认使用置信度 `0.25` 过滤，验证指标继续使用 Ultralytics 的验证阈值，因此预览和 mAP 采用的置信度范围可能不同。多 GPU 验证分片保存在各 `rank_XXXX/` 子目录，rank 0 汇总索引、去重 sampler 补齐项并写曲线；GPU / DDP 仍需在实际环境核验。
+
+默认每个 epoch 保存**全部 val 图片**，因此耗时和磁盘用量随 epoch 数、图片数量与原图尺寸增长。需要少存一些时：
+
+```bash
+python -m skyseg train \
+  --data datasets/sky_v1/data.yaml \
+  --config configs/train_yolov8s_seg.yaml \
+  --device 0 \
+  --val-save-limit 16 \
+  --val-mask-conf 0.25
+```
+
+`--val-save-limit 16` 仅限制每个 epoch 落盘的验证图片数量，完整 val 验证照常执行；`0` 表示全部。`--val-mask-conf` 只影响导出 mask / 预览。使用 `--no-tensorboard` 可关闭本项目的 writer，mask 和指标文件仍会保存。YAML 的 `skyseg:` 中可配置相同默认值及 `tensorboard_images`；这些参数不会传给 Ultralytics。续训沿用 checkpoint 的训练超参，但使用当前 YAML / CLI 的这些监控设置。
 
 ## 7. 评估：实例 mAP + 天空像素 IoU
 
@@ -321,14 +366,26 @@ non_sky = ~sky
 | `skyseg/validate.py` | 数据完整性与泄漏检查 |
 | `skyseg/png_profiles.py` | 检查 / 清理已有 PNG 的 ICC 元数据，保留压缩像素数据 |
 | `skyseg/train.py` | Ultralytics 训练 / 续训 / dry-run |
+| `skyseg/monitoring.py` | TensorBoard 曲线、原尺寸验证 mask / 叠加图、按 epoch 保存指标 |
+| `skyseg/yolo_training.py` | 训练 / 验证适配器，复用验证预测，兼容 tensor / dict 两种上游格式 |
 | `skyseg/inference.py` | 二值预测与像素指标 |
 | `configs/train_yolov8s_seg.yaml` | YOLOv8s-seg 初始训练配置 |
 | `tests/test_pipeline.py` | 不依赖模型的 CPU 回归测试 |
 | `tests/test_validation.py` | 校验进度、单次读取、损坏文件路径及完整性检查回归测试 |
 | `tests/test_png_profiles.py` | ICC 清理、非 ICC 块 / 像素保留及失败原子性回归测试 |
 | `tests/test_sam3_precision.py` | 使用真实 PyTorch CPU 张量复现及验证 dtype 修复 |
+| `tests/test_monitoring.py` | 曲线、mask 去 padding、空预测、保存数量及多 rank 索引合并 |
+| `tests/test_training_smoke.py` | 可选真实 CPU 两 epoch 训练与中断续训，核验 TensorBoard 和逐 epoch 文件 |
 
-测试集包含 42 项数据流程 / 校验 / PNG 清理测试，以及 9 项真实 PyTorch 张量精度回归测试。本次 ICC 清理更新在 Python 3.12、NumPy 1.26、OpenCV 4.11 环境中通过全部 42 项数据流程 / 校验 / PNG 清理测试和 `pip check`；未安装 torch，精度测试模块跳过。新增回归覆盖旧标注副本、训练 / 续训前自动清理、YAML 实际路径解析、只读清理失败、dry-run 不修改文件，以及真实 OpenCV C 层 ICC 警告在清理后消失且像素一致。9 项精度测试此前已在 PyTorch 2.10 CPU 环境中通过：用同样的强制 BF16 融合算子加 FP32 线性层复现原错误，验证 FP32 修复后结果与普通 MLP 一致、参数保持不变、不会修改其他模型实例、外层 autocast 被正确隔离、BF16 回退以及图像 / 文本阶段共享上下文。**测试使用小型模型或模拟 SAM3 / YOLO 接口；尚未在你的 GPU、真实图片或完整权重上执行 SAM3 推理与 YOLO 训练。**
+本次在 Python 3.12、PyTorch 2.10 CPU、NumPy 1.26、OpenCV 4.11 环境中通过 **64 项回归测试**和 `pip check`，包括数据流程、完整性 / ICC 检查、真实张量 dtype、TensorBoard 指标、mask 去 padding 和多 rank 索引合并。还分别使用 Ultralytics **8.4.194 与 8.3.0** 通过两项可选真实 CPU 训练测试：YOLOv8s-seg 从 YAML 随机初始化、两 epoch 训练，以及第一 epoch 后中断再恢复至第三 epoch；实际读取 TensorBoard 事件和每个 epoch 的 mask / 叠加图 / 指标，确认曲线编号连续、原图尺寸正确、最终 best.pt 评估不覆盖 epoch 结果。旧版 8.3.0 配合 PyTorch 2.10 的测试仅对测试自行生成的可信 checkpoint 使用 `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` 处理上游旧加载器兼容性；日常安装建议更新 Ultralytics。
+
+```bash
+pytest -q
+# 有 YOLO 依赖时，另运行真实 CPU 小数据训练 / 续训测试（不下载预训练权重）
+SKYSEG_RUN_TRAINING_SMOKE=1 pytest -q -s tests/test_training_smoke.py
+```
+
+**SAM3 回归仍使用小型模型或模拟输出；尚未在你的 GPU、真实数据、完整 SAM3 权重或实际多 GPU 环境上执行验证。**
 
 参考官方接口（2026-10-29 核对）：
 

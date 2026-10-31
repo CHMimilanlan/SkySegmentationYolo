@@ -30,3 +30,11 @@ hsv_s: 0.1
 hsv_v: 0.2
 project: runs/segment
 name: sky_yolov8s
+val: true
+plots: true
+# Pipeline settings are removed before passing arguments to Ultralytics.
+skyseg:
+  tensorboard: true
+  val_save_limit: 0  # all validation images, every epoch
+  val_mask_conf: 0.25
+  tensorboard_images: 4

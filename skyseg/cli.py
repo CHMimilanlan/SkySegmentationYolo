@@ -64,6 +64,9 @@ def parser() -> argparse.ArgumentParser:
     train.add_argument("--project", type=Path)
     train.add_argument("--name")
     train.add_argument("--resume", action="store_true")
+    train.add_argument("--no-tensorboard", action="store_true", help="Disable this pipeline's TensorBoard writer")
+    train.add_argument("--val-save-limit", type=int, help="Save the first N validation images each epoch; 0 saves all (default)")
+    train.add_argument("--val-mask-conf", type=float, help="Confidence filter for saved masks/previews (default .25); validation metrics unchanged")
     train.add_argument("--dry-run", action="store_true", help="Validate inputs and print config without torch/GPU")
     train.set_defaults(handler="train:run")
 
